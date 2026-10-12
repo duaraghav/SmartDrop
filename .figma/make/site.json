@@ -1,0 +1,10 @@
+{
+  "description": "Streamline package pickup for IIM Bangalore hostel students with a digital sign-in and onboarding experience that ensures safe, trackable deliveries.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
