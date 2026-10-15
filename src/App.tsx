@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { supabase } from './lib/supabase'
 
 type Screen =
   | 'welcome'
@@ -14,6 +15,20 @@ interface UserData {
   name: string
   hostelBlock: string
   room: string
+}
+
+// IIMB email addresses come in two forms: "firstname.lastname26@iimb.ac.in"
+// (dotted) or "firstnamel26@iimb.ac.in" (first name + last initial + batch
+// year, no separator). We can reliably recover the first name from the
+// dotted form; for the undotted form we can only strip the trailing batch
+// digits, which leaves the last initial stuck on (e.g. "anjalik26" ->
+// "Anjalik"). That's an approximation, not a real name -- good enough for a
+// greeting, not for anything that needs the actual full name.
+function deriveDisplayName(email: string): string {
+  const local = email.split('@')[0] ?? ''
+  const base = local.includes('.') ? local.split('.')[0] : local.replace(/\d+$/, '')
+  const cleaned = base || 'Student'
+  return cleaned.charAt(0).toUpperCase() + cleaned.slice(1)
 }
 
 // ─── Shared Layout ───────────────────────────────────────────────────────────
@@ -254,17 +269,29 @@ function SignInScreen({ onNext, userData, setUserData }: {
   const [email, setEmail] = useState(userData.email)
   const [touched, setTouched] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [authError, setAuthError] = useState('')
 
   const isValidEmail = (v: string) => /^[a-zA-Z0-9._%+-]+@iimb\.ac\.in$/.test(v.trim())
   const hasTyped = email.length > 0
   const showError = touched && hasTyped && !isValidEmail(email)
 
-  function handleSubmit() {
+  async function handleSubmit() {
     setTouched(true)
+    setAuthError('')
     if (!isValidEmail(email)) return
     setLoading(true)
-    setUserData(d => ({ ...d, email: email.trim() }))
-    setTimeout(() => { setLoading(false); onNext() }, 1200)
+    const trimmed = email.trim()
+    const { error } = await supabase.auth.signInWithOtp({
+      email: trimmed,
+      options: { shouldCreateUser: true },
+    })
+    setLoading(false)
+    if (error) {
+      setAuthError(error.message)
+      return
+    }
+    setUserData(d => ({ ...d, email: trimmed }))
+    onNext()
   }
 
   return (
@@ -345,6 +372,16 @@ function SignInScreen({ onNext, userData, setUserData }: {
               </p>
             </div>
           )}
+
+          {authError && (
+            <div className="mt-2 flex items-center gap-1.5 animate-fade-in">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+                <circle cx="12" cy="12" r="10" fill="#ef4444" />
+                <path d="M12 7v5M12 16v1" stroke="white" strokeWidth="2" strokeLinecap="round" />
+              </svg>
+              <p className="text-xs font-medium" style={{ color: '#ef4444' }}>{authError}</p>
+            </div>
+          )}
         </div>
 
         <div className="mt-6 animate-fade-up-delay-3">
@@ -376,7 +413,6 @@ function SignInScreen({ onNext, userData, setUserData }: {
 // ─── Screen 3: OTP Verification ──────────────────────────────────────────────
 
 const OTP_LENGTH = 6
-const DEMO_OTP = '123456'
 
 function OTPScreen({ onNext, onBack, userData }: {
   onNext: () => void
@@ -423,27 +459,35 @@ function OTPScreen({ onNext, onBack, userData }: {
     }
   }
 
-  function verify(code: string) {
+  async function verify(code: string) {
     setLoading(true)
-    setTimeout(() => {
-      setLoading(false)
-      if (code === DEMO_OTP) {
-        onNext()
-      } else {
-        setError('Incorrect code. Try 123456 for this demo.')
-        setOtp(Array(OTP_LENGTH).fill(''))
-        inputRefs.current[0]?.focus()
-      }
-    }, 1200)
+    const { error: verifyError } = await supabase.auth.verifyOtp({
+      email: userData.email,
+      token: code,
+      type: 'email',
+    })
+    setLoading(false)
+    if (verifyError) {
+      setError(verifyError.message)
+      setOtp(Array(OTP_LENGTH).fill(''))
+      inputRefs.current[0]?.focus()
+      return
+    }
+    onNext()
   }
 
-  function resend() {
+  async function resend() {
     if (!canResend) return
     setCountdown(30)
     setCanResend(false)
     setOtp(Array(OTP_LENGTH).fill(''))
     setError('')
     inputRefs.current[0]?.focus()
+    const { error: resendError } = await supabase.auth.signInWithOtp({
+      email: userData.email,
+      options: { shouldCreateUser: false },
+    })
+    if (resendError) setError(resendError.message)
   }
 
   const filled = otp.filter(Boolean).length
@@ -482,9 +526,6 @@ function OTPScreen({ onNext, onBack, userData }: {
           <p className="mt-2 text-sm leading-relaxed" style={{ color: 'var(--muted-foreground)' }}>
             We sent a 6-digit code to<br />
             <span className="font-semibold" style={{ color: 'var(--foreground)' }}>{userData.email || 'your IIMB email'}</span>
-          </p>
-          <p className="mt-1 text-xs" style={{ color: 'var(--muted-foreground)' }}>
-            Demo hint: use <span style={{ color: 'var(--accent)', fontWeight: 600 }}>123456</span>
           </p>
         </div>
 
@@ -597,8 +638,7 @@ function OTPScreen({ onNext, onBack, userData }: {
 // ─── Screen 4: Success / Reward ───────────────────────────────────────────────
 
 function SuccessScreen({ onNext, userData }: { onNext: () => void; userData: UserData }) {
-  const firstName = userData.email.split('@')[0].split('.')[0]
-  const displayName = firstName.charAt(0).toUpperCase() + firstName.slice(1)
+  const displayName = deriveDisplayName(userData.email)
 
   return (
     <MobileShell>
@@ -728,14 +768,31 @@ function SetupScreen({ onNext, userData, setUserData }: {
   const [block, setBlock] = useState(userData.hostelBlock)
   const [room, setRoom] = useState(userData.room)
   const [loading, setLoading] = useState(false)
+  const [saveError, setSaveError] = useState('')
 
   const isComplete = block && room.trim()
 
-  function handleSubmit() {
+  async function handleSubmit() {
     if (!isComplete) return
     setLoading(true)
-    setUserData(d => ({ ...d, hostelBlock: block, room: room.trim() }))
-    setTimeout(() => { setLoading(false); onNext() }, 1000)
+    setSaveError('')
+
+    // No dedicated "name" field in this flow yet -- derive a display name
+    // from the email prefix, same as the Success/Dashboard screens.
+    const fullName = deriveDisplayName(userData.email)
+
+    const { error } = await supabase.rpc('complete_onboarding', {
+      p_full_name: fullName,
+      p_hostel_block: block,
+      p_room: room.trim(),
+    })
+    setLoading(false)
+    if (error) {
+      setSaveError(error.message)
+      return
+    }
+    setUserData(d => ({ ...d, hostelBlock: block, room: room.trim(), name: fullName }))
+    onNext()
   }
 
   return (
@@ -855,6 +912,16 @@ function SetupScreen({ onNext, userData, setUserData }: {
               </div>
             </div>
           )}
+
+          {saveError && (
+            <div className="flex items-center gap-1.5 animate-fade-in">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+                <circle cx="12" cy="12" r="10" fill="#ef4444" />
+                <path d="M12 7v5M12 16v1" stroke="white" strokeWidth="2" strokeLinecap="round" />
+              </svg>
+              <p className="text-xs font-medium" style={{ color: '#ef4444' }}>{saveError}</p>
+            </div>
+          )}
         </div>
 
         <div className="flex-1" />
@@ -872,8 +939,7 @@ function SetupScreen({ onNext, userData, setUserData }: {
 // ─── Screen 6: Dashboard (Empty State) ──────────────────────────────────────
 
 function DashboardScreen({ userData }: { userData: UserData }) {
-  const firstName = userData.email.split('@')[0].split('.')[0]
-  const displayName = firstName.charAt(0).toUpperCase() + firstName.slice(1)
+  const displayName = userData.name || deriveDisplayName(userData.email)
   const shortBlock = userData.hostelBlock.split(' — ')[1] || userData.hostelBlock
 
   return (
@@ -1056,6 +1122,7 @@ function DashboardScreen({ userData }: { userData: UserData }) {
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>('welcome')
+  const [checkingSession, setCheckingSession] = useState(true)
   const [userData, setUserData] = useState<UserData>({
     email: '',
     name: '',
@@ -1064,6 +1131,49 @@ export default function App() {
   })
 
   const go = useCallback((s: Screen) => setScreen(s), [])
+
+  // On load, resume an existing session instead of forcing a signed-in user
+  // back through sign-in/OTP on every refresh.
+  useEffect(() => {
+    let active = true
+    async function restoreSession() {
+      const { data: { session } } = await supabase.auth.getSession()
+      if (!active) return
+      if (!session) {
+        setCheckingSession(false)
+        return
+      }
+
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('full_name, hostel_block, room, onboarding_completed')
+        .eq('id', session.user.id)
+        .maybeSingle()
+
+      if (!active) return
+      setUserData(d => ({
+        ...d,
+        email: session.user.email ?? '',
+        name: profile?.full_name ?? '',
+        hostelBlock: profile?.hostel_block ?? '',
+        room: profile?.room ?? '',
+      }))
+      setScreen(profile?.onboarding_completed ? 'dashboard' : 'setup')
+      setCheckingSession(false)
+    }
+    restoreSession()
+    return () => { active = false }
+  }, [])
+
+  if (checkingSession) {
+    return (
+      <MobileShell>
+        <div className="flex items-center justify-center" style={{ minHeight: '100svh' }}>
+          <Logo size="md" />
+        </div>
+      </MobileShell>
+    )
+  }
 
   return (
     <div key={screen}>
